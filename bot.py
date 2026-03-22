@@ -1,5 +1,4 @@
 import os
-import json
 import random
 import asyncio
 import tempfile
@@ -7,8 +6,8 @@ import httpx
 from gtts import gTTS
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    Voice, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
     FSInputFile,
 )
 from aiogram.filters import CommandStart, Command
@@ -16,539 +15,482 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ══════════════════════════════════════
-#  CONFIG — вставь свои ключи сюда
-# ══════════════════════════════════════
-BOT_TOKEN  = os.getenv("BOT_TOKEN",  "ВСТАВЬ_TELEGRAM_TOKEN")
-GROQ_KEY   = os.getenv("GROQ_API_KEY", "ВСТАВЬ_GROQ_KEY")
+# ══════════════════════════════════════════════════════
+#  КОНФИГ
+# ══════════════════════════════════════════════════════
+BOT_TOKEN = os.getenv("BOT_TOKEN", "ВСТАВЬ_ТОКЕН")
+GROQ_KEY  = os.getenv("GROQ_API_KEY", "ВСТАВЬ_GROQ_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
-# ══════════════════════════════════════
-#  STATES
-# ══════════════════════════════════════
-class Game(StatesGroup):
-    enter_name  = State()
-    choose_hero = State()
-    map_screen  = State()
-    answering   = State()
-    speaking    = State()
+# ══════════════════════════════════════════════════════
+#  СОСТОЯНИЯ
+# ══════════════════════════════════════════════════════
+class S(StatesGroup):
+    enter_name  = State()   # ввод имени
+    choose_hero = State()   # выбор героя
+    on_map      = State()   # карта тем
+    answering   = State()   # выбор ответа кнопкой
+    speaking    = State()   # ждём голосовое
 
-# ══════════════════════════════════════
-#  PLAYER DATA  (in-memory, per user)
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  ДАННЫЕ ИГРОКА
+# ══════════════════════════════════════════════════════
 players: dict[int, dict] = {}
 
-def get_player(uid: int) -> dict:
+def new_player() -> dict:
+    return {
+        "name": "", "hero": 0,
+        "coins": 0, "correct": 0, "streak": 0, "xp": 0, "level": 1,
+        "topic": "", "questions": [], "idx": 0,
+        "round_coins": 0, "round_correct": 0,
+    }
+
+def P(uid: int) -> dict:
     if uid not in players:
-        players[uid] = {
-            "name": "", "hero": 0, "coins": 0,
-            "correct": 0, "streak": 0, "xp": 0, "level": 1,
-            "topic": "", "questions": [], "q_idx": 0,
-            "round_coins": 0, "round_correct": 0,
-            "locked": False,
-        }
+        players[uid] = new_player()
     return players[uid]
 
-HEROES = ["🧒 STRIKER", "👦 WINGER", "👧 KEEPER", "🧑 CAPTAIN"]
-HERO_EMOJI = ["🧒","👦","👧","🧑"]
-LEVELS = ["ROOKIE","PLAYER","PRO","LEGEND","ICON"]
+HEROES  = ["🧒 STRIKER", "👦 WINGER", "👧 KEEPER", "🧑 CAPTAIN"]
+H_EMOJI = ["🧒", "👦", "👧", "🧑"]
+LEVELS  = ["ROOKIE", "PLAYER", "PRO", "LEGEND", "ICON"]
 
-# ══════════════════════════════════════
-#  QUESTIONS
-# ══════════════════════════════════════
-QUESTIONS = {
+# ══════════════════════════════════════════════════════
+#  ВОПРОСЫ
+# ══════════════════════════════════════════════════════
+QDB = {
 "he_his": [
-  {"coach":"🐐 MESSI",   "scene":"Посмотри! Это Лука. Лука — мальчик.",          "q":"Как сказать «кто это»?",           "choices":["He","She","They","It"],       "ans":"He",    "say":"He is a boy",       "tr":"Он — мальчик"},
-  {"coach":"🐐 MESSI",   "scene":"У Луки есть крутой рюкзак с Месси!",            "q":"Чей это рюкзак? «Это ___ рюкзак»", "choices":["his","her","their","our"],    "ans":"his",   "say":"It is his bag",     "tr":"Это его сумка"},
-  {"coach":"🦁 RONALDO", "scene":"Лука бьёт по мячу. Мяч летит в ворота!",       "q":"Кто бьёт?",                        "choices":["He","She","They","We"],       "ans":"He",    "say":"He kicks the ball", "tr":"Он бьёт по мячу"},
-  {"coach":"🦁 RONALDO", "scene":"У Луки новые бутсы. Как у Роналду!",            "q":"Чьи бутсы?",                       "choices":["his","her","my","your"],      "ans":"his",   "say":"It is his boot",    "tr":"Это его бутса"},
-  {"coach":"🐐 MESSI",   "scene":"Лука выиграл кубок! Все хлопают!",              "q":"Кто выиграл?",                     "choices":["He","She","They","I"],        "ans":"He",    "say":"He won the cup",    "tr":"Он выиграл кубок"},
+  {"coach":"🐐 MESSI",   "scene":"Посмотри! Это Лука. Лука — мальчик.",         "q":"Как сказать «кто это»?",            "choices":["He","She","They","It"],    "ans":"He",    "say":"He is a boy",        "tr":"Он — мальчик"},
+  {"coach":"🐐 MESSI",   "scene":"У Луки есть рюкзак с эмблемой Месси!",        "q":"Чей это рюкзак? «Это ___ рюкзак»", "choices":["his","her","their","our"], "ans":"his",   "say":"It is his bag",      "tr":"Это его сумка"},
+  {"coach":"🦁 RONALDO", "scene":"Лука бьёт по мячу. Мяч летит в ворота!",      "q":"Кто бьёт по мячу?",                "choices":["He","She","They","We"],    "ans":"He",    "say":"He kicks the ball",  "tr":"Он бьёт по мячу"},
+  {"coach":"🦁 RONALDO", "scene":"У Луки новые бутсы, как у Роналду!",          "q":"Чьи это бутсы?",                   "choices":["his","her","my","your"],   "ans":"his",   "say":"It is his boot",     "tr":"Это его бутса"},
+  {"coach":"🐐 MESSI",   "scene":"Лука выиграл кубок! Все хлопают!",            "q":"Кто выиграл кубок?",               "choices":["He","She","They","I"],     "ans":"He",    "say":"He won the cup",     "tr":"Он выиграл кубок"},
 ],
 "she_her": [
-  {"coach":"🦁 RONALDO", "scene":"Это Соня. Она любит футбол!",                   "q":"Как сказать «кто это»?",           "choices":["She","He","They","It"],       "ans":"She",   "say":"She is a girl",          "tr":"Она — девочка"},
-  {"coach":"🦁 RONALDO", "scene":"У Сони есть майка её любимой команды!",         "q":"Чья это майка?",                   "choices":["her","his","their","our"],    "ans":"her",   "say":"It is her shirt",        "tr":"Это её майка"},
-  {"coach":"🦁 RONALDO", "scene":"Соня финтит как Роналду! Красиво!",             "q":"Кто финтит?",                      "choices":["She","He","They","I"],        "ans":"She",   "say":"She dribbles the ball",  "tr":"Она дриблирует"},
-  {"coach":"⚡ MBAPPÉ",  "scene":"Соня — вратарь. Она поймала мяч!",              "q":"Чьи перчатки?",                    "choices":["her","his","my","your"],      "ans":"her",   "say":"It is her glove",        "tr":"Это её перчатка"},
-  {"coach":"🦁 RONALDO", "scene":"Соня получила медаль! Она чемпион!",            "q":"Кто получил медаль?",              "choices":["She","He","They","We"],       "ans":"She",   "say":"She got the medal",      "tr":"Она получила медаль"},
+  {"coach":"🦁 RONALDO", "scene":"Это Соня. Она обожает футбол!",                "q":"Как сказать «кто это»?",           "choices":["She","He","They","It"],    "ans":"She",   "say":"She is a girl",          "tr":"Она — девочка"},
+  {"coach":"🦁 RONALDO", "scene":"У Сони есть майка любимой команды!",           "q":"Чья это майка?",                   "choices":["her","his","their","our"], "ans":"her",   "say":"It is her shirt",        "tr":"Это её майка"},
+  {"coach":"🦁 RONALDO", "scene":"Соня делает финт как Роналду! Красиво!",       "q":"Кто делает финт?",                 "choices":["She","He","They","I"],     "ans":"She",   "say":"She dribbles the ball",  "tr":"Она дриблирует"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"Соня — вратарь. Она поймала мяч!",             "q":"Чьи это перчатки?",                "choices":["her","his","my","your"],   "ans":"her",   "say":"It is her glove",        "tr":"Это её перчатка"},
+  {"coach":"🦁 RONALDO", "scene":"Соня получила медаль! Она настоящий чемпион!", "q":"Кто получил медаль?",              "choices":["She","He","They","We"],    "ans":"She",   "say":"She got the medal",      "tr":"Она получила медаль"},
 ],
 "they_their": [
-  {"coach":"⚡ MBAPPÉ",  "scene":"Это Лука и Соня. Они играют вместе!",           "q":"Как сказать «кто они»?",           "choices":["They","He","She","We"],       "ans":"They",  "say":"They are friends",       "tr":"Они друзья"},
-  {"coach":"⚡ MBAPPÉ",  "scene":"У Луки и Сони есть мяч. Они пасуют!",           "q":"Чей мяч? «Это ___ мяч»",          "choices":["their","his","her","our"],    "ans":"their", "say":"It is their ball",       "tr":"Это их мяч"},
-  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня бегут к воротам! Быстро!",          "q":"Кто бежит?",                       "choices":["They","He","She","I"],        "ans":"They",  "say":"They run to the goal",   "tr":"Они бегут к воротам"},
-  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня носят одинаковые майки.",           "q":"Чьи это майки?",                   "choices":["their","his","her","my"],     "ans":"their", "say":"It is their shirt",      "tr":"Это их майки"},
-  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня выиграли! Команда радуется!",       "q":"Кто выиграл?",                     "choices":["They","He","She","We"],       "ans":"They",  "say":"They won the match",     "tr":"Они выиграли матч"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"Это Лука и Соня. Они — лучшие друзья!",        "q":"Как сказать «кто они»?",           "choices":["They","He","She","We"],    "ans":"They",  "say":"They are friends",       "tr":"Они друзья"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"У Луки и Сони есть мяч. Они пасуют!",          "q":"Чей это мяч?",                     "choices":["their","his","her","our"], "ans":"their", "say":"It is their ball",       "tr":"Это их мяч"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня бегут к воротам! Быстро!",         "q":"Кто бежит к воротам?",             "choices":["They","He","She","I"],     "ans":"They",  "say":"They run to the goal",   "tr":"Они бегут к воротам"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня носят одинаковые майки.",          "q":"Чьи это майки?",                   "choices":["their","his","her","my"],  "ans":"their", "say":"It is their shirt",      "tr":"Это их майки"},
+  {"coach":"⚡ MBAPPÉ",  "scene":"Лука и Соня вместе выиграли матч!",            "q":"Кто выиграл матч?",                "choices":["They","He","She","We"],    "ans":"They",  "say":"They won the match",     "tr":"Они выиграли матч"},
 ],
 }
 
-def get_mixed():
-    return random.sample(QUESTIONS["he_his"],2) + \
-           random.sample(QUESTIONS["she_her"],2) + \
-           random.sample(QUESTIONS["they_their"],1)
+def make_mixed():
+    return (random.sample(QDB["he_his"], 2) +
+            random.sample(QDB["she_her"], 2) +
+            random.sample(QDB["they_their"], 1))
 
-# ══════════════════════════════════════
-#  KEYBOARDS
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  КЛАВИАТУРЫ
+# ══════════════════════════════════════════════════════
 def kb_heroes():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=h, callback_data=f"hero_{i}") for i,h in enumerate(HEROES[:2])],
-        [InlineKeyboardButton(text=h, callback_data=f"hero_{i}") for i,h in enumerate(HEROES[2:], 2)],
+        [InlineKeyboardButton(text=HEROES[0], callback_data="hero_0"),
+         InlineKeyboardButton(text=HEROES[1], callback_data="hero_1")],
+        [InlineKeyboardButton(text=HEROES[2], callback_data="hero_2"),
+         InlineKeyboardButton(text=HEROES[3], callback_data="hero_3")],
     ])
 
 def kb_topics():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👦 HE / HIS",       callback_data="topic_he_his")],
-        [InlineKeyboardButton(text="👧 SHE / HER",      callback_data="topic_she_her")],
-        [InlineKeyboardButton(text="👥 THEY / THEIR",   callback_data="topic_they_their")],
-        [InlineKeyboardButton(text="🏆 CHAMPIONS CUP (x2 монеты)", callback_data="topic_mixed")],
+        [InlineKeyboardButton(text="👦 HE / HIS",     callback_data="topic_he_his")],
+        [InlineKeyboardButton(text="👧 SHE / HER",    callback_data="topic_she_her")],
+        [InlineKeyboardButton(text="👥 THEY / THEIR", callback_data="topic_they_their")],
+        [InlineKeyboardButton(text="🏆 CHAMPIONS CUP · x2 монеты", callback_data="topic_mixed")],
     ])
 
-def kb_choices(choices: list[str]):
+def kb_answers(choices: list[str]):
     rows = []
     for i in range(0, len(choices), 2):
-        row = [InlineKeyboardButton(text=choices[j], callback_data=f"ans_{choices[j]}")
-               for j in range(i, min(i+2, len(choices)))]
-        rows.append(row)
+        rows.append([
+            InlineKeyboardButton(text=choices[j], callback_data=f"ans_{choices[j]}")
+            for j in range(i, min(i + 2, len(choices)))
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def kb_after_speech():
+def kb_next():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➡️ Следующий вопрос", callback_data="next_q")],
+        [InlineKeyboardButton(text="➡️ Следующий вопрос", callback_data="next_q")]
     ])
 
-def kb_round_end():
+def kb_end():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗺 На карту",   callback_data="go_map")],
-        [InlineKeyboardButton(text="🔄 Ещё раз",    callback_data="replay")],
+        [InlineKeyboardButton(text="🗺 На карту", callback_data="go_map"),
+         InlineKeyboardButton(text="🔄 Ещё раз",  callback_data="replay")],
     ])
 
-# ══════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════
-def player_card(p: dict) -> str:
-    hero  = HERO_EMOJI[p["hero"]]
-    lvl   = LEVELS[min(p["level"]-1, 4)]
+# ══════════════════════════════════════════════════════
+#  КАРТОЧКА ИГРОКА
+# ══════════════════════════════════════════════════════
+def card(p: dict) -> str:
+    lvl = LEVELS[min(p["level"] - 1, 4)]
     stars = "⭐" * min(p["level"], 5)
+    filled = int(p["xp"] / (p["level"] * 100) * 10)
+    xp_bar = "▓" * filled + "░" * (10 - filled)
     return (
-        f"┌─────────────────────┐\n"
-        f"│  {hero}  {p['name']:<14}│\n"
-        f"│  LVL {p['level']}  {lvl:<12}│\n"
-        f"│  {stars:<21}│\n"
-        f"├─────────────────────┤\n"
-        f"│ ⚽ Монеты:  {p['coins']:<9}│\n"
-        f"│ ✅ Правильно: {p['correct']:<7}│\n"
-        f"│ 🔥 Серия:  {p['streak']:<9}│\n"
-        f"│ 📊 XP: {p['xp']}/{p['level']*100:<11}│\n"
-        f"└─────────────────────┘"
+        f"┌──────────────────────┐\n"
+        f"│ {H_EMOJI[p['hero']]}  {p['name']:<15}│\n"
+        f"│ LVL {p['level']}  {lvl:<13}│\n"
+        f"│ {stars:<22}│\n"
+        f"├──────────────────────┤\n"
+        f"│ ⚽ Монеты:   {p['coins']:<9}│\n"
+        f"│ ✅ Правильно: {p['correct']:<8}│\n"
+        f"│ 🔥 Серия:   {p['streak']:<9}│\n"
+        f"│ XP [{xp_bar}]        │\n"
+        f"│    {p['xp']} / {p['level']*100:<16}│\n"
+        f"└──────────────────────┘"
     )
 
-def xp_bar(p: dict) -> str:
-    pct = int(p["xp"] / (p["level"] * 100) * 10)
-    return "▓" * pct + "░" * (10 - pct)
-
 def check_level(p: dict) -> bool:
-    need = p["level"] * 100
-    if p["xp"] >= need:
-        p["xp"] -= need
+    if p["xp"] >= p["level"] * 100:
+        p["xp"] -= p["level"] * 100
         p["level"] += 1
         return True
     return False
 
-async def send_question(message_or_cb, p: dict, state: FSMContext):
-    q = p["questions"][p["q_idx"]]
-    total = len(p["questions"])
-    prog = int((p["q_idx"] / total) * 10)
-    bar  = "⬛" * prog + "⬜" * (10 - prog)
-
-    text = (
-        f"⚽ *Вопрос {p['q_idx']+1} из {total}*\n"
-        f"{bar}\n\n"
-        f"{q['coach']} говорит:\n"
-        f"_{q['scene']}_\n\n"
-        f"❓ *{q['q']}*"
-    )
-
-    if isinstance(message_or_cb, CallbackQuery):
-        await message_or_cb.message.answer(text, reply_markup=kb_choices(q["choices"]), parse_mode="Markdown")
-    else:
-        await message_or_cb.answer(text, reply_markup=kb_choices(q["choices"]), parse_mode="Markdown")
-
-    await state.set_state(Game.answering)
-
-# ══════════════════════════════════════
-#  GROQ WHISPER — распознавание голоса
-# ══════════════════════════════════════
-async def transcribe_voice(file_bytes: bytes, filename: str = "voice.ogg") -> str:
-    url = "https://api.groq.com/openai/v1/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {GROQ_KEY}"}
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
-        f.write(file_bytes)
-        tmp_path = f.name
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            with open(tmp_path, "rb") as audio:
-                resp = await client.post(
-                    url,
-                    headers=headers,
-                    files={"file": (filename, audio, "audio/ogg")},
-                    data={"model": "whisper-large-v3", "language": "en", "response_format": "json"},
-                )
-            if resp.status_code == 200:
-                return resp.json().get("text", "").strip().lower()
-            return ""
-    finally:
-        os.unlink(tmp_path)
-
-# ══════════════════════════════════════
-#  GOOGLE TTS — озвучка правильного ответа
-# ══════════════════════════════════════
-async def speak_english(text: str, message: Message, caption: str = ""):
-    """Генерирует голосовое сообщение с английской фразой и отправляет его."""
+# ══════════════════════════════════════════════════════
+#  GOOGLE TTS — озвучка
+# ══════════════════════════════════════════════════════
+async def say(text: str, msg: Message, caption: str = ""):
+    """Генерирует голосовое через Google TTS и отправляет его."""
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             tmp_path = f.name
-        tts = gTTS(text=text, lang="en", slow=True)  # slow=True — медленнее, чётче для детей
-        tts.save(tmp_path)
-        audio = FSInputFile(tmp_path)
-        await message.answer_voice(audio, caption=caption, parse_mode="Markdown")
-        os.unlink(tmp_path)
+        # gTTS в executor чтобы не блокировать event loop
+        await asyncio.get_event_loop().run_in_executor(
+            None, lambda: gTTS(text=text, lang="en", slow=True).save(tmp_path)
+        )
+        await msg.answer_voice(FSInputFile(tmp_path), caption=caption, parse_mode="Markdown")
     except Exception as e:
-        print(f"TTS error: {e}")
+        print(f"[TTS ERROR] {e}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
-def eval_speech(transcript: str, target: str) -> tuple[bool, float]:
+# ══════════════════════════════════════════════════════
+#  GROQ WHISPER — распознавание речи
+# ══════════════════════════════════════════════════════
+async def transcribe(audio_bytes: bytes) -> str:
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
+        async with httpx.AsyncClient(timeout=30) as client:
+            with open(tmp_path, "rb") as f:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                    files={"file": ("voice.ogg", f, "audio/ogg")},
+                    data={"model": "whisper-large-v3", "language": "en", "response_format": "json"},
+                )
+        if resp.status_code == 200:
+            return resp.json().get("text", "").strip().lower()
+        print(f"[GROQ ERROR] {resp.status_code}: {resp.text}")
+        return ""
+    except Exception as e:
+        print(f"[TRANSCRIBE ERROR] {e}")
+        return ""
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+def check_speech(transcript: str, target: str) -> tuple[bool, float]:
     t_words = target.lower().split()
     s_words = transcript.lower().split()
-    hits = sum(1 for w in t_words if any(w.strip(".,!?") in sw for sw in s_words))
+    hits = sum(1 for w in t_words if any(w.strip(".,!?") in s for s in s_words))
     ratio = hits / len(t_words) if t_words else 0
     return ratio >= 0.5, ratio
 
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  ОТПРАВИТЬ ВОПРОС
+# ══════════════════════════════════════════════════════
+async def send_question(target: Message, p: dict, state: FSMContext):
+    q     = p["questions"][p["idx"]]
+    total = len(p["questions"])
+    bar   = "⬛" * p["idx"] + "⬜" * (total - p["idx"])
+    await target.answer(
+        f"⚽ *Вопрос {p['idx'] + 1} из {total}*\n{bar}\n\n"
+        f"{q['coach']} говорит:\n_{q['scene']}_\n\n"
+        f"❓ *{q['q']}*",
+        reply_markup=kb_answers(q["choices"]),
+        parse_mode="Markdown",
+    )
+    await state.set_state(S.answering)
+
+# ══════════════════════════════════════════════════════
 #  /start
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 @dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    players[uid] = {
-        "name": "", "hero": 0, "coins": 0,
-        "correct": 0, "streak": 0, "xp": 0, "level": 1,
-        "topic": "", "questions": [], "q_idx": 0,
-        "round_coins": 0, "round_correct": 0, "locked": False,
-    }
-    await message.answer(
+async def cmd_start(msg: Message, state: FSMContext):
+    players[msg.from_user.id] = new_player()
+    await msg.answer(
         "⚽ *FOOTBALL ENGLISH QUEST* ⚽\n\n"
         "🦁 *RONALDO говорит:*\n"
-        "_Йо! Хочешь стать звездой как я?\n"
-        "Сначала нужно выучить английский!\n\n"
-        "Как тебя зовут, чемпион?_",
-        parse_mode="Markdown"
+        "_Йо, чемпион! Учим английский вместе!\n"
+        "Как тебя зовут?_",
+        parse_mode="Markdown",
     )
-    await state.set_state(Game.enter_name)
+    await state.set_state(S.enter_name)
 
-# ══════════════════════════════════════
-#  ENTER NAME
-# ══════════════════════════════════════
-@dp.message(Game.enter_name)
-async def enter_name(message: Message, state: FSMContext):
-    name = message.text.strip()[:14].upper()
-    p = get_player(message.from_user.id)
-    p["name"] = name
-    await message.answer(
-        f"🔥 Отлично, *{name}*!\n\n"
-        f"🐐 *MESSI говорит:*\n"
-        f"_Теперь выбери своего игрока!_",
+# ══════════════════════════════════════════════════════
+#  ИМЯ
+# ══════════════════════════════════════════════════════
+@dp.message(S.enter_name)
+async def got_name(msg: Message, state: FSMContext):
+    p = P(msg.from_user.id)
+    p["name"] = msg.text.strip()[:14].upper()
+    await msg.answer(
+        f"🔥 Отлично, *{p['name']}*!\n\n"
+        f"🐐 *MESSI говорит:*\n_Выбери своего игрока!_",
         reply_markup=kb_heroes(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
-    await state.set_state(Game.choose_hero)
+    await state.set_state(S.choose_hero)
 
-# ══════════════════════════════════════
-#  CHOOSE HERO
-# ══════════════════════════════════════
-@dp.callback_query(Game.choose_hero, F.data.startswith("hero_"))
-async def choose_hero(cb: CallbackQuery, state: FSMContext):
-    idx = int(cb.data.split("_")[1])
-    p = get_player(cb.from_user.id)
-    p["hero"] = idx
+# ══════════════════════════════════════════════════════
+#  ВЫБОР ГЕРОЯ
+# ══════════════════════════════════════════════════════
+@dp.callback_query(S.choose_hero, F.data.startswith("hero_"))
+async def got_hero(cb: CallbackQuery, state: FSMContext):
+    p = P(cb.from_user.id)
+    p["hero"] = int(cb.data.split("_")[1])
     await cb.message.edit_reply_markup()
     await cb.message.answer(
-        f"✅ Ты выбрал *{HEROES[idx]}*!\n\n"
-        f"```\n{player_card(p)}\n```\n"
-        f"XP: [{xp_bar(p)}] {p['xp']}/{p['level']*100}\n\n"
-        f"⚡ *MBAPPÉ говорит:*\n_Без разминки не бывает голов!\nВыбирай тему и вперёд!_",
+        f"✅ Ты выбрал *{HEROES[p['hero']]}*!\n\n"
+        f"```\n{card(p)}\n```\n\n"
+        f"⚡ *MBAPPÉ говорит:*\n_Без тренировок нет голов! Выбирай тему:_",
         reply_markup=kb_topics(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
-    await state.set_state(Game.map_screen)
+    await state.set_state(S.on_map)
     await cb.answer()
 
-# ══════════════════════════════════════
-#  /map  — вернуться на карту
-# ══════════════════════════════════════
-@dp.message(Command("map"))
-@dp.callback_query(F.data == "go_map")
-async def go_map(event, state: FSMContext):
-    if isinstance(event, CallbackQuery):
-        uid = event.from_user.id
-        msg = event.message
-        await event.answer()
-    else:
-        uid = event.from_user.id
-        msg = event
-
-    p = get_player(uid)
-    await msg.answer(
-        f"```\n{player_card(p)}\n```\n"
-        f"XP: [{xp_bar(p)}] {p['xp']}/{p['level']*100}\n\n"
-        f"🗺 Выбирай тему:",
+# ══════════════════════════════════════════════════════
+#  КАРТА — /map или кнопка
+# ══════════════════════════════════════════════════════
+async def show_map(target: Message, p: dict, state: FSMContext):
+    await target.answer(
+        f"```\n{card(p)}\n```\n\n🗺 *Выбирай тему:*",
         reply_markup=kb_topics(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
-    await state.set_state(Game.map_screen)
+    await state.set_state(S.on_map)
 
-# ══════════════════════════════════════
-#  CHOOSE TOPIC
-# ══════════════════════════════════════
+@dp.message(Command("map"))
+async def cmd_map(msg: Message, state: FSMContext):
+    await show_map(msg, P(msg.from_user.id), state)
+
+@dp.callback_query(F.data == "go_map")
+async def cb_map(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_reply_markup()
+    await show_map(cb.message, P(cb.from_user.id), state)
+    await cb.answer()
+
+# ══════════════════════════════════════════════════════
+#  ВЫБОР ТЕМЫ
+# ══════════════════════════════════════════════════════
 @dp.callback_query(F.data.startswith("topic_"))
-async def choose_topic(cb: CallbackQuery, state: FSMContext):
+async def got_topic(cb: CallbackQuery, state: FSMContext):
+    p     = P(cb.from_user.id)
     topic = cb.data.replace("topic_", "")
-    p = get_player(cb.from_user.id)
-    p["topic"] = topic
-
-    if topic == "mixed":
-        qs = get_mixed()
-    else:
-        qs = random.sample(QUESTIONS[topic], 5)
-
-    p["questions"]     = qs
-    p["q_idx"]         = 0
+    p["topic"]         = topic
+    p["questions"]     = make_mixed() if topic == "mixed" else random.sample(QDB[topic], 5)
+    p["idx"]           = 0
     p["round_coins"]   = 0
     p["round_correct"] = 0
-    p["locked"]        = False
-
-    labels = {"he_his":"HE / HIS","she_her":"SHE / HER","they_their":"THEY / THEIR","mixed":"CHAMPIONS CUP 🏆"}
+    labels = {"he_his":"HE / HIS","she_her":"SHE / HER",
+              "they_their":"THEY / THEIR","mixed":"CHAMPIONS CUP 🏆"}
     await cb.message.edit_reply_markup()
     await cb.message.answer(
-        f"🚀 Начинаем *{labels.get(topic,topic)}*!\n"
-        f"{'🌟 x2 монеты за этот раунд!' if topic=='mixed' else ''}",
-        parse_mode="Markdown"
+        f"🚀 *{labels[topic]}* — поехали!\n"
+        + ("🌟 _x2 монеты за этот раунд!_" if topic == "mixed" else ""),
+        parse_mode="Markdown",
     )
-    await send_question(cb, p, state)
+    await send_question(cb.message, p, state)
     await cb.answer()
 
-# ══════════════════════════════════════
-#  ANSWER
-# ══════════════════════════════════════
-@dp.callback_query(Game.answering, F.data.startswith("ans_"))
-async def handle_answer(cb: CallbackQuery, state: FSMContext):
-    p = get_player(cb.from_user.id)
-    if p["locked"]:
-        await cb.answer("Подожди!")
-        return
-
-    p["locked"] = True
+# ══════════════════════════════════════════════════════
+#  ОТВЕТ КНОПКОЙ
+# ══════════════════════════════════════════════════════
+@dp.callback_query(S.answering, F.data.startswith("ans_"))
+async def got_answer(cb: CallbackQuery, state: FSMContext):
+    p   = P(cb.from_user.id)
     val = cb.data.replace("ans_", "")
-    q   = p["questions"][p["q_idx"]]
+    q   = p["questions"][p["idx"]]
 
     await cb.message.edit_reply_markup()
 
     if val.lower() == q["ans"].lower():
+        # ── ПРАВИЛЬНО → просим повторить голосом ──
         await cb.message.answer(
-            f"✅ *ПРАВИЛЬНО!* — *{val}*\n\n"
+            f"✅ *ПРАВИЛЬНО!* — *{val}*\n"
             f"_{q['tr']}_\n\n"
-            f"🎤 *Теперь повтори это вслух голосовым сообщением:*\n\n"
-            f"🟢  *{q['say']}*\n\n"
-            f"_Запиши голосовое — держи кнопку 🎤 в Телеграм_",
-            parse_mode="Markdown"
+            f"🎤 *Повтори вслух голосовым сообщением:*\n"
+            f"🟢 *{q['say']}*\n\n"
+            f"_Держи кнопку 🎤 и говори по-английски_",
+            parse_mode="Markdown",
         )
-        # Отправляем эталонное произношение
-        await speak_english(
-            q["say"],
-            cb.message,
-            caption=f"🔊 *Слушай как правильно:* _{q['say']}_"
-        )
-        await state.set_state(Game.speaking)
+        await say(q["say"], cb.message, caption=f"🔊 *Слушай и повторяй:* `{q['say']}`")
+        await state.set_state(S.speaking)
+
     else:
+        # ── НЕПРАВИЛЬНО → озвучиваем и едем дальше ──
         p["streak"] = 0
-        coach = q["coach"]
         await cb.message.answer(
             f"❌ *Неправильно!*\n\n"
-            f"{coach} говорит: _«Не так! Правильно: *{q['ans']}*»_\n\n"
+            f"{q['coach']}: _Правильный ответ: *{q['ans']}*_\n"
             f"_{q['tr']}_",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
-        # Озвучиваем правильный ответ
-        await speak_english(
-            q["say"],
-            cb.message,
-            caption=f"🔊 *Правильно звучит так:* _{q['say']}_"
-        )
-        await cb.message.answer("", reply_markup=kb_after_speech())
+        await say(q["say"], cb.message, caption=f"🔊 *Правильно звучит так:* `{q['say']}`")
+        await cb.message.answer("👇", reply_markup=kb_next())
 
     await cb.answer()
 
-# ══════════════════════════════════════
-#  VOICE MESSAGE
-# ══════════════════════════════════════
-@dp.message(Game.speaking, F.voice)
-async def handle_voice(message: Message, state: FSMContext):
-    p = get_player(message.from_user.id)
-    q = p["questions"][p["q_idx"]]
+# ══════════════════════════════════════════════════════
+#  ГОЛОСОВОЕ СООБЩЕНИЕ
+# ══════════════════════════════════════════════════════
+@dp.message(S.speaking, F.voice)
+async def got_voice(msg: Message, state: FSMContext):
+    p = P(msg.from_user.id)
+    q = p["questions"][p["idx"]]
 
-    wait_msg = await message.answer("🎧 Слушаю твой ответ...")
+    wait = await msg.answer("🎧 Слушаю...")
+    file  = await bot.get_file(msg.voice.file_id)
+    audio = (await bot.download_file(file.file_path)).read()
+    transcript = await transcribe(audio)
+    await wait.delete()
 
-    # Скачать голосовое
-    file = await bot.get_file(message.voice.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    audio_data = file_bytes.read()
-
-    # Распознать через Groq Whisper
-    transcript = await transcribe_voice(audio_data)
-
-    await wait_msg.delete()
-
+    # Не расслышали — просим ещё раз, остаёмся в S.speaking
     if not transcript:
-        await message.answer(
-            "😕 Не смог расслышать. Попробуй ещё раз!\n"
-            "_Говори чётко и не слишком быстро_",
-            reply_markup=kb_after_speech(),
-            parse_mode="Markdown"
+        await msg.answer(
+            "😕 *Не расслышал!* Попробуй ещё раз.\n"
+            "_Говори чётко, не слишком быстро_",
+            parse_mode="Markdown",
         )
+        await say(q["say"], msg, caption=f"🔊 Ещё раз: `{q['say']}`")
         return
 
-    ok, ratio = eval_speech(transcript, q["say"])
+    ok, ratio = check_speech(transcript, q["say"])
     bonus = 15 if p["topic"] == "mixed" else 10
 
     if ok:
-        p["coins"]        += bonus
-        p["correct"]      += 1
-        p["streak"]       += 1
-        p["round_correct"]+= 1
-        p["round_coins"]  += bonus
-        p["xp"]           += 15
-
+        # ── ХОРОШЕЕ ПРОИЗНОШЕНИЕ ──
+        p["coins"]         += bonus
+        p["correct"]       += 1
+        p["streak"]        += 1
+        p["round_correct"] += 1
+        p["round_coins"]   += bonus
+        p["xp"]            += 15
         leveled = check_level(p)
-        stars = "🌟" if ratio > 0.85 else "👍"
 
+        grade = "🌟 Супер произношение!" if ratio > 0.85 else "👍 Хорошо!"
         text = (
-            f"{stars} *Отлично!*\n\n"
+            f"✅ *{grade}*\n"
             f"Я услышал: _{transcript}_\n\n"
-            f"{'🌟 Супер произношение!' if ratio > 0.85 else '👍 Хорошо!'}\n\n"
-            f"⚽ *+{bonus} монет!*  Всего: {p['coins']}\n"
+            f"⚽ *+{bonus} монет!* Всего: {p['coins']}\n"
             f"🔥 Серия: {p['streak']}"
         )
         if leveled:
-            text += f"\n\n⭐ *LEVEL UP! Теперь ты LVL {p['level']} — {LEVELS[min(p['level']-1,4)]}!*"
+            text += f"\n\n⭐ *LEVEL UP! LVL {p['level']} — {LEVELS[min(p['level']-1,4)]}!*"
+        await msg.answer(text, parse_mode="Markdown")
+        await say(q["say"], msg, caption=f"🔊 *Эталонное произношение:* `{q['say']}`")
+        await msg.answer("👇", reply_markup=kb_next())
 
-        await message.answer(text, parse_mode="Markdown")
-        # Эталонное произношение после похвалы
-        await speak_english(
-            q["say"],
-            message,
-            caption=f"🔊 *А вот идеальное произношение:* _{q['say']}_"
-        )
     else:
-        text = (
-            f"🔁 Почти! Попробуй ещё раз!\n\n"
+        # ── ПЛОХОЕ ПРОИЗНОШЕНИЕ → слушаем снова, остаёмся в S.speaking ──
+        await msg.answer(
+            f"🔁 *Почти! Попробуй ещё раз.*\n"
             f"Я услышал: _{transcript}_\n"
-            f"Надо сказать: *{q['say']}*"
+            f"Надо сказать: *{q['say']}*",
+            parse_mode="Markdown",
         )
-        await message.answer(text, parse_mode="Markdown")
-        # Озвучиваем правильный вариант чтобы ребёнок услышал
-        await speak_english(
-            q["say"],
-            message,
-            caption=f"🔊 *Слушай ещё раз и повтори:* _{q['say']}_"
-        )
+        await say(q["say"], msg, caption=f"🔊 *Слушай внимательно:* `{q['say']}`")
+        # остаёмся в S.speaking — ждём новую попытку
 
-    await message.answer("", reply_markup=kb_after_speech())
-
-# ══════════════════════════════════════
-#  NEXT QUESTION
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  СЛЕДУЮЩИЙ ВОПРОС
+# ══════════════════════════════════════════════════════
 @dp.callback_query(F.data == "next_q")
-async def next_question(cb: CallbackQuery, state: FSMContext):
-    p = get_player(cb.from_user.id)
-    p["q_idx"] += 1
-    p["locked"]  = False
+async def next_q(cb: CallbackQuery, state: FSMContext):
+    p = P(cb.from_user.id)
+    p["idx"] += 1
     await cb.message.edit_reply_markup()
 
-    if p["q_idx"] >= len(p["questions"]):
-        # Round complete
+    if p["idx"] >= len(p["questions"]):
         await cb.message.answer(
             f"🏆 *ФИНАЛЬНЫЙ СВИСТОК!*\n\n"
-            f"```\n{player_card(p)}\n```\n"
-            f"XP: [{xp_bar(p)}] {p['xp']}/{p['level']*100}\n\n"
+            f"```\n{card(p)}\n```\n\n"
             f"📊 *Результат раунда:*\n"
             f"✅ Правильных: {p['round_correct']} / {len(p['questions'])}\n"
             f"⚽ Монет заработано: {p['round_coins']}\n"
             f"🔥 Серия: {p['streak']}",
-            reply_markup=kb_round_end(),
-            parse_mode="Markdown"
+            reply_markup=kb_end(),
+            parse_mode="Markdown",
         )
-        await state.set_state(Game.map_screen)
+        await state.set_state(S.on_map)
     else:
-        await send_question(cb, p, state)
+        await send_question(cb.message, p, state)
 
     await cb.answer()
 
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 #  REPLAY
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 @dp.callback_query(F.data == "replay")
 async def replay(cb: CallbackQuery, state: FSMContext):
-    p = get_player(cb.from_user.id)
+    p     = P(cb.from_user.id)
     topic = p["topic"]
-    if topic == "mixed":
-        qs = get_mixed()
-    else:
-        qs = random.sample(QUESTIONS[topic], 5)
-    p["questions"]     = qs
-    p["q_idx"]         = 0
+    p["questions"]     = make_mixed() if topic == "mixed" else random.sample(QDB[topic], 5)
+    p["idx"]           = 0
     p["round_coins"]   = 0
     p["round_correct"] = 0
-    p["locked"]        = False
     await cb.message.edit_reply_markup()
-    await cb.message.answer("🔄 Начинаем снова!")
-    await send_question(cb, p, state)
+    await cb.message.answer("🔄 *Начинаем снова!*", parse_mode="Markdown")
+    await send_question(cb.message, p, state)
     await cb.answer()
 
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 #  /stats
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 @dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    p = get_player(message.from_user.id)
-    await message.answer(
-        f"```\n{player_card(p)}\n```\n"
-        f"XP: [{xp_bar(p)}] {p['xp']}/{p['level']*100}",
-        parse_mode="Markdown"
-    )
+async def cmd_stats(msg: Message):
+    await msg.answer(f"```\n{card(P(msg.from_user.id))}\n```", parse_mode="Markdown")
 
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
 #  FALLBACK
-# ══════════════════════════════════════
-@dp.message(Game.speaking)
-async def speaking_fallback(message: Message):
-    await message.answer(
-        "🎤 Отправь *голосовое сообщение*!\n"
-        "_Держи кнопку 🎤 в Телеграм и говори_",
-        parse_mode="Markdown"
+# ══════════════════════════════════════════════════════
+@dp.message(S.speaking)
+async def speaking_fallback(msg: Message):
+    await msg.answer(
+        "🎤 *Жду голосовое сообщение!*\n"
+        "_Держи кнопку 🎤 в Телеграм и говори по-английски_",
+        parse_mode="Markdown",
     )
 
 @dp.message()
-async def fallback(message: Message, state: FSMContext):
-    await message.answer(
-        "Напиши /start чтобы начать игру\n"
-        "или /map чтобы вернуться на карту\n"
-        "или /stats чтобы посмотреть статистику"
+async def fallback(msg: Message):
+    await msg.answer(
+        "/start — начать игру\n"
+        "/map — карта тем\n"
+        "/stats — моя карточка"
     )
 
-# ══════════════════════════════════════
-#  RUN
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════
+#  ЗАПУСК
+# ══════════════════════════════════════════════════════
 async def main():
-    print("✅ Bot started!")
+    print("✅ Football English Quest bot started!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
