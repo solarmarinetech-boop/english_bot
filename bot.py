@@ -4,10 +4,12 @@ import random
 import asyncio
 import tempfile
 import httpx
+from gtts import gTTS
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    Voice, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    Voice, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    FSInputFile,
 )
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
@@ -198,6 +200,22 @@ async def transcribe_voice(file_bytes: bytes, filename: str = "voice.ogg") -> st
     finally:
         os.unlink(tmp_path)
 
+# ══════════════════════════════════════
+#  GOOGLE TTS — озвучка правильного ответа
+# ══════════════════════════════════════
+async def speak_english(text: str, message: Message, caption: str = ""):
+    """Генерирует голосовое сообщение с английской фразой и отправляет его."""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            tmp_path = f.name
+        tts = gTTS(text=text, lang="en", slow=True)  # slow=True — медленнее, чётче для детей
+        tts.save(tmp_path)
+        audio = FSInputFile(tmp_path)
+        await message.answer_voice(audio, caption=caption, parse_mode="Markdown")
+        os.unlink(tmp_path)
+    except Exception as e:
+        print(f"TTS error: {e}")
+
 def eval_speech(transcript: str, target: str) -> tuple[bool, float]:
     t_words = target.lower().split()
     s_words = transcript.lower().split()
@@ -338,10 +356,16 @@ async def handle_answer(cb: CallbackQuery, state: FSMContext):
         await cb.message.answer(
             f"✅ *ПРАВИЛЬНО!* — *{val}*\n\n"
             f"_{q['tr']}_\n\n"
-            f"🎤 *Теперь скажи это вслух голосовым сообщением:*\n\n"
+            f"🎤 *Теперь повтори это вслух голосовым сообщением:*\n\n"
             f"🟢  *{q['say']}*\n\n"
             f"_Запиши голосовое — держи кнопку 🎤 в Телеграм_",
             parse_mode="Markdown"
+        )
+        # Отправляем эталонное произношение
+        await speak_english(
+            q["say"],
+            cb.message,
+            caption=f"🔊 *Слушай как правильно:* _{q['say']}_"
         )
         await state.set_state(Game.speaking)
     else:
@@ -351,9 +375,15 @@ async def handle_answer(cb: CallbackQuery, state: FSMContext):
             f"❌ *Неправильно!*\n\n"
             f"{coach} говорит: _«Не так! Правильно: *{q['ans']}*»_\n\n"
             f"_{q['tr']}_",
-            reply_markup=kb_after_speech(),
             parse_mode="Markdown"
         )
+        # Озвучиваем правильный ответ
+        await speak_english(
+            q["say"],
+            cb.message,
+            caption=f"🔊 *Правильно звучит так:* _{q['say']}_"
+        )
+        await cb.message.answer("", reply_markup=kb_after_speech())
 
     await cb.answer()
 
@@ -409,14 +439,29 @@ async def handle_voice(message: Message, state: FSMContext):
         )
         if leveled:
             text += f"\n\n⭐ *LEVEL UP! Теперь ты LVL {p['level']} — {LEVELS[min(p['level']-1,4)]}!*"
+
+        await message.answer(text, parse_mode="Markdown")
+        # Эталонное произношение после похвалы
+        await speak_english(
+            q["say"],
+            message,
+            caption=f"🔊 *А вот идеальное произношение:* _{q['say']}_"
+        )
     else:
         text = (
-            f"🔁 Попробуй ещё раз!\n\n"
+            f"🔁 Почти! Попробуй ещё раз!\n\n"
             f"Я услышал: _{transcript}_\n"
             f"Надо сказать: *{q['say']}*"
         )
+        await message.answer(text, parse_mode="Markdown")
+        # Озвучиваем правильный вариант чтобы ребёнок услышал
+        await speak_english(
+            q["say"],
+            message,
+            caption=f"🔊 *Слушай ещё раз и повтори:* _{q['say']}_"
+        )
 
-    await message.answer(text, reply_markup=kb_after_speech(), parse_mode="Markdown")
+    await message.answer("", reply_markup=kb_after_speech())
 
 # ══════════════════════════════════════
 #  NEXT QUESTION
